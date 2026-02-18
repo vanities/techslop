@@ -7,26 +7,27 @@ import logging
 from datetime import datetime, timezone
 
 import feedparser
+import httpx
 
 from techslop.config import settings
 from techslop.models import Story
 
 logger = logging.getLogger(__name__)
 FEED_URL_TEMPLATE = "https://www.reddit.com/r/{subreddit}/.rss"
+USER_AGENT = "techslop/0.1 (news aggregator)"
 
 
 def _parse_feed(subreddit: str) -> list[Story]:
-    """Parse a single subreddit RSS feed into Story objects.
-
-    Stories are scored by their position in the feed: the first entry gets
-    the highest score (equal to total number of entries) and the last entry
-    gets a score of 1.  This reflects Reddit's default "hot" ranking.
-    """
+    """Fetch and parse a single subreddit RSS feed into Story objects."""
     url = FEED_URL_TEMPLATE.format(subreddit=subreddit)
     stories: list[Story] = []
 
     try:
-        feed = feedparser.parse(url)
+        # Reddit blocks default feedparser UA, so fetch with httpx first
+        resp = httpx.get(url, headers={"User-Agent": USER_AGENT}, timeout=15, follow_redirects=True)
+        resp.raise_for_status()
+
+        feed = feedparser.parse(resp.text)
         if feed.bozo and not feed.entries:
             logger.warning(
                 "feedparser reported an error for r/%s: %s",
@@ -44,14 +45,12 @@ def _parse_feed(subreddit: str) -> list[Story]:
 
             story_id = hashlib.sha256(link.encode()).hexdigest()
 
-            # Prefer the published timestamp; fall back to updated, then now.
             time_struct = entry.get("published_parsed") or entry.get("updated_parsed")
             if time_struct:
                 published_at = datetime(*time_struct[:6], tzinfo=timezone.utc)
             else:
                 published_at = datetime.now(timezone.utc)
 
-            # Position-based score: top of feed = highest score.
             position_score = float(total - rank)
 
             stories.append(
@@ -73,11 +72,7 @@ def _parse_feed(subreddit: str) -> list[Story]:
 
 
 async def fetch_reddit() -> list[Story]:
-    """Fetch stories from all configured subreddit RSS feeds.
-
-    feedparser is synchronous, but we wrap the call in an async function
-    so it conforms to the same interface as the other source fetchers.
-    """
+    """Fetch stories from all configured subreddit RSS feeds."""
     all_stories: list[Story] = []
 
     subreddits = [s.strip() for s in settings.reddit_subreddits.split(",")]
