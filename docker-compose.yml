@@ -1,0 +1,18 @@
+services:
+  techslop:
+    build: .
+    volumes:
+      - ./output:/app/output
+      - ./.env:/app/.env:ro
+    command: ["run"]
+
+  cron:
+    build: .
+    volumes:
+      - ./output:/app/output
+      - ./.env:/app/.env:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "0 */6 * * * cd /app && uv run python pipeline.py run >> /var/log/techslop.log 2>&1" | crontab -
+        cron -f

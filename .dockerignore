@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+output/
+*.mp4
+*.mp3
+*.wav
+.venv/
+.git/
+.mypy_cache/
+.ruff_cache/
