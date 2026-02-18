@@ -7,9 +7,11 @@ import logging
 from typing import Callable, Awaitable
 
 from techslop.models import Story
+from techslop.ingest.fourchan import fetch_fourchan
 from techslop.ingest.hackernews import fetch_hackernews
 from techslop.ingest.reddit import fetch_reddit
 from techslop.ingest.techcrunch import fetch_techcrunch
+from techslop.ingest.xtwitter import fetch_x
 from techslop.ingest.scorer import score_and_rank
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ SOURCES: list[tuple[str, SourceFetcher]] = [
     ("hackernews", fetch_hackernews),
     ("reddit", fetch_reddit),
     ("techcrunch", fetch_techcrunch),
+    ("4chan", fetch_fourchan),
+    ("x", fetch_x),
 ]
 
 

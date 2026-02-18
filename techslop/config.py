@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     database_path: str = "techslop.db"
     output_dir: str = "output"
 
+    # Configurable Reddit subreddits (comma-separated)
+    reddit_subreddits: str = "technology,programming,machinelearning,artificial,LocalLLaMA"
+
+    # 4chan keyword filters (comma-separated)
+    fourchan_keywords: str = "AI,LLM,GPU,linux,rust,python,open source,self-hosted,homelab,programming"
+
+    # X/Twitter search keywords (comma-separated)
+    x_keywords: str = "AI breakthrough,new programming language,open source release,tech layoffs,GPU,LLM"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

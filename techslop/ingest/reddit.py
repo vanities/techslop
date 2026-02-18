@@ -8,11 +8,10 @@ from datetime import datetime, timezone
 
 import feedparser
 
+from techslop.config import settings
 from techslop.models import Story
 
 logger = logging.getLogger(__name__)
-
-SUBREDDITS = ["technology", "programming"]
 FEED_URL_TEMPLATE = "https://www.reddit.com/r/{subreddit}/.rss"
 
 
@@ -81,7 +80,8 @@ async def fetch_reddit() -> list[Story]:
     """
     all_stories: list[Story] = []
 
-    for subreddit in SUBREDDITS:
+    subreddits = [s.strip() for s in settings.reddit_subreddits.split(",")]
+    for subreddit in subreddits:
         stories = _parse_feed(subreddit)
         all_stories.extend(stories)
         logger.info("Fetched %d stories from r/%s", len(stories), subreddit)

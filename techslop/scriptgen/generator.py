@@ -1,4 +1,4 @@
-"""Script generation module using OpenAI to create YouTube Shorts scripts from tech news."""
+"""Script generation using OpenAI — feeds all gathered context for richer scripts."""
 
 from __future__ import annotations
 
@@ -14,19 +14,23 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a scriptwriter for a viral tech news YouTube Shorts channel called "TechSlop".
-Your job is to turn a tech news headline into a punchy, engaging 30-45 second script.
+Your job is to turn a tech news story and its surrounding discussion into a punchy, \
+engaging 30-45 second script.
 
 Rules:
 - The hook MUST grab attention in the first 3 seconds. Start with something shocking, \
 funny, or curiosity-driven. Never start with "Hey guys" or "So today".
 - Body sections should each be 5-10 seconds of narration. Keep sentences short and punchy.
 - Use casual, opinionated tech commentary. Be snarky but informative.
+- If community comments/reactions are provided, weave in the best takes — what people \
+are actually saying about this. Quote or paraphrase the spiciest reactions.
 - screen_text should be a short, bold caption (1-6 words) that reinforces the narration.
 - duration_hint is the estimated seconds for that section.
 - The CTA should be quick and natural, like "Follow for more tech chaos" or \
 "Drop a comment if you saw this coming".
 - Total script should be 60-100 words for a 30-45 second short.
 - Produce 3-5 body sections.
+- Be NOVEL. Don't sound like every other AI news channel. Have a take. Be weird. Be real.
 
 Respond with JSON in this exact format:
 {
@@ -43,36 +47,52 @@ Respond with JSON in this exact format:
 """
 
 
+def _build_context(story: Story) -> str:
+    """Build a rich context string from a story and all its gathered data."""
+    parts = [
+        f"Title: {story.title}",
+        f"Source: {story.source}",
+        f"URL: {story.url}",
+    ]
+
+    if story.raw_data.get("summary"):
+        parts.append(f"Summary: {story.raw_data['summary']}")
+
+    # HN / 4chan comments
+    comments = story.raw_data.get("comments", [])
+    if comments:
+        parts.append("\nCommunity reactions:")
+        for c in comments[:8]:
+            if isinstance(c, dict):
+                author = c.get("author", "anon")
+                text = c.get("text", "")
+                parts.append(f"  - {author}: {text[:200]}")
+            else:
+                parts.append(f"  - {str(c)[:200]}")
+
+    # X/Twitter tweet text
+    if story.raw_data.get("tweet_text"):
+        parts.append(f"\nTweet: {story.raw_data['tweet_text'][:300]}")
+
+    return "\n".join(parts)
+
+
 async def generate_script(story: Story) -> Script:
-    """Generate a YouTube Shorts script from a tech news story.
+    """Generate a YouTube Shorts script from a tech news story with full context.
 
-    Uses OpenAI GPT-4o-mini to produce a structured script with a hook,
-    body sections, and a call-to-action.
-
-    Args:
-        story: The tech news story to generate a script for.
-
-    Returns:
-        A fully populated Script dataclass.
-
-    Raises:
-        openai.APIError: If the OpenAI API request fails.
-        json.JSONDecodeError: If the response is not valid JSON.
-        KeyError: If the response JSON is missing required fields.
+    Feeds all gathered context (comments, discussions, tweet text) to OpenAI
+    for richer, more novel scripts.
     """
     client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
+    context = _build_context(story)
     user_prompt = (
-        f"Write a YouTube Shorts script about this tech news story:\n\n"
-        f"Title: {story.title}\n"
-        f"Source: {story.source}\n"
-        f"URL: {story.url}\n"
+        f"Write a YouTube Shorts script about this tech news story.\n"
+        f"Use the community reactions to make it feel authentic and plugged-in.\n\n"
+        f"{context}"
     )
 
-    if story.raw_data.get("summary"):
-        user_prompt += f"Summary: {story.raw_data['summary']}\n"
-
-    logger.info("Generating script for story %s: %s", story.id, story.title)
+    logger.info("Generating script for story %s: %s", story.id[:12], story.title)
 
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
@@ -100,7 +120,6 @@ async def generate_script(story: Story) -> Script:
         for section in data["body"]
     ]
 
-    # Concatenate all spoken parts into a single string for TTS
     body_texts = " ".join(section.text for section in body)
     full_text = f"{hook} {body_texts} {cta}"
 
@@ -113,8 +132,7 @@ async def generate_script(story: Story) -> Script:
     )
 
     logger.info(
-        "Script generated for story %s: %d body sections, %d chars",
-        story.id,
+        "Script generated: %d sections, %d chars",
         len(body),
         len(full_text),
     )

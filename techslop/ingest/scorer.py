@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 # Per-source quality weights.
 SOURCE_WEIGHTS: dict[str, float] = {
     "hackernews": 1.0,
-    "reddit": 0.8,
     "techcrunch": 0.9,
+    "x": 0.85,
+    "reddit": 0.8,
+    "4chan": 0.7,
 }
 
 # Stories published less than this many hours ago get a recency boost.

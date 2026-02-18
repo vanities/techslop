@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
 TOP_N = 30
+TOP_COMMENTS = 5
 
 
 async def _fetch_item(client: httpx.AsyncClient, item_id: int) -> dict | None:
@@ -27,11 +29,29 @@ async def _fetch_item(client: httpx.AsyncClient, item_id: int) -> dict | None:
         return None
 
 
-def _make_story(item: dict) -> Story | None:
+def _strip_html(text: str) -> str:
+    """Strip HTML tags from text."""
+    return re.sub(r"<[^>]+>", "", text)
+
+
+async def _fetch_comments(client: httpx.AsyncClient, item: dict) -> list[dict]:
+    """Fetch top comments for an HN story."""
+    kid_ids = item.get("kids", [])[:TOP_COMMENTS]
+    comments = []
+    for kid_id in kid_ids:
+        comment = await _fetch_item(client, kid_id)
+        if comment and comment.get("text") and not comment.get("deleted"):
+            comments.append({
+                "author": comment.get("by", "anon"),
+                "text": _strip_html(comment["text"]),
+            })
+    return comments
+
+
+def _make_story(item: dict, comments: list[dict] | None = None) -> Story | None:
     """Convert an HN item dict into a Story, or None if unusable."""
     url = item.get("url")
     if not url:
-        # Self-posts link to the HN comments page instead.
         url = f"https://news.ycombinator.com/item?id={item['id']}"
 
     title = item.get("title", "")
@@ -41,6 +61,10 @@ def _make_story(item: dict) -> Story | None:
     story_id = hashlib.sha256(url.encode()).hexdigest()
     published_at = datetime.fromtimestamp(item.get("time", 0), tz=timezone.utc)
 
+    raw_data = dict(item)
+    if comments:
+        raw_data["comments"] = comments
+
     return Story(
         id=story_id,
         title=title,
@@ -48,7 +72,7 @@ def _make_story(item: dict) -> Story | None:
         source="hackernews",
         score=float(item.get("score", 0)),
         published_at=published_at,
-        raw_data=item,
+        raw_data=raw_data,
     )
 
 
@@ -69,7 +93,8 @@ async def fetch_hackernews() -> list[Story]:
                 item = await _fetch_item(client, item_id)
                 if item is None:
                     continue
-                story = _make_story(item)
+                comments = await _fetch_comments(client, item)
+                story = _make_story(item, comments)
                 if story is not None:
                     stories.append(story)
 
