@@ -132,45 +132,44 @@ def show(story_id):
 
 @cli.command()
 @click.argument("story_id")
-@click.option("--edit", is_flag=True, help="Open script in $EDITOR after generation.")
-def script(story_id, edit):
-    """Generate a script for a story. Review and optionally edit."""
-    from techslop.scriptgen.generator import generate_script
+@click.option("--interactive", "-i", is_flag=True, help="Dump raw context only — skip AI generation, craft the script yourself.")
+def script(story_id, interactive):
+    """Generate a script for a story, or dump context for manual crafting.
 
+    Default: generates a script via OpenAI as a starting point.
+    With --interactive: prints all raw context (story, comments, tweets)
+    so you can collaborate on the script in Claude Code, then save it
+    by editing output/<id>/script.json directly.
+    """
     story = _find_story(story_id)
     if not story:
         return
 
+    story_dir = _story_dir(story.id)
+    script_path = story_dir / "script.json"
+
+    if interactive:
+        _dump_story_context(story)
+        click.echo(f"\nScript file: {script_path}")
+        click.echo("Craft the script here, then I'll save it to script.json.")
+        click.echo("When done, run: pipeline.py voice " + story.id[:12])
+        return
+
+    from techslop.scriptgen.generator import generate_script
+
     click.echo(f"Generating script for: {story.title[:60]}...")
     script_obj = asyncio.run(generate_script(story))
 
-    # Save script JSON for review/editing
-    story_dir = _story_dir(story.id)
-    script_path = story_dir / "script.json"
     _save_script_json(script_obj, script_path)
 
-    # Create video job
     job = VideoJob(story_id=story.id, script=script_obj)
     job_id = create_video_job(job)
     update_story_status(story.id, "scripted")
 
-    click.echo(f"\nHook: {script_obj.hook}")
-    click.echo(f"\nBody:")
-    for i, section in enumerate(script_obj.body, 1):
-        click.echo(f"  {i}. [{section.screen_text}] {section.text} ({section.duration_hint}s)")
-    click.echo(f"\nCTA: {script_obj.cta}")
-    click.echo(f"\nFull text ({len(script_obj.full_text)} chars):")
-    click.echo(f"  {script_obj.full_text}")
+    _print_script(script_obj)
     click.echo(f"\nScript saved to: {script_path}")
     click.echo(f"Job ID: {job_id}")
-
-    if edit:
-        editor = _get_editor()
-        click.echo(f"Opening in {editor}...")
-        subprocess.run([editor, str(script_path)])
-        click.echo("Script edited. Re-run 'voice' when ready.")
-
-    click.echo(f"\nNext: pipeline.py voice {story.id[:12]}")
+    click.echo(f"\nEdit the script, or continue: pipeline.py voice {story.id[:12]}")
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +403,63 @@ def _load_script_json(path: Path, story_id: str):
     )
 
 
-def _get_editor() -> str:
-    import os
-    return os.environ.get("EDITOR", "vim")
+def _dump_story_context(story):
+    """Print all raw context for a story — used in interactive script crafting."""
+    click.echo(f"\n{'='*70}")
+    click.echo(f"STORY CONTEXT")
+    click.echo(f"{'='*70}")
+    click.echo(f"Title:     {story.title}")
+    click.echo(f"Source:    {story.source}")
+    click.echo(f"URL:       {story.url}")
+    click.echo(f"Score:     {story.score:.3f}")
+    click.echo(f"Published: {story.published_at}")
+
+    comments = story.raw_data.get("comments", [])
+    if comments:
+        click.echo(f"\n--- Community Reactions ({len(comments)}) ---")
+        for c in comments:
+            if isinstance(c, dict):
+                author = c.get("author", "anon")
+                text = c.get("text", "")
+                click.echo(f"\n  [{author}]:")
+                click.echo(f"  {text[:500]}")
+            else:
+                click.echo(f"\n  {str(c)[:500]}")
+
+    if story.raw_data.get("tweet_text"):
+        click.echo(f"\n--- Tweet ---")
+        click.echo(f"  {story.raw_data['tweet_text'][:500]}")
+
+    # Show any other useful raw_data
+    summary = story.raw_data.get("summary")
+    if summary:
+        click.echo(f"\n--- Summary ---")
+        click.echo(f"  {summary[:500]}")
+
+    click.echo(f"\n{'='*70}")
+    click.echo(f"SCRIPT FORMAT (save to script.json):")
+    click.echo(f"{'='*70}")
+    click.echo("""{
+  "story_id": "<id>",
+  "hook": "Attention-grabbing opener (3 seconds)",
+  "body": [
+    {"text": "Narration", "screen_text": "ON-SCREEN TEXT", "duration_hint": 7.0}
+  ],
+  "cta": "Call to action",
+  "full_text": "All narration concatenated for TTS"
+}""")
+
+
+def _print_script(script_obj):
+    """Pretty-print a generated script."""
+    click.echo(f"\n--- Generated Script ---")
+    click.echo(f"\nHook: {script_obj.hook}")
+    click.echo(f"\nBody:")
+    for i, section in enumerate(script_obj.body, 1):
+        click.echo(f"  {i}. [{section.screen_text}] {section.text} ({section.duration_hint}s)")
+    click.echo(f"\nCTA: {script_obj.cta}")
+    click.echo(f"\nFull narration ({len(script_obj.full_text)} chars):")
+    click.echo(f"  {script_obj.full_text}")
 
 
 def _open_file(path: Path):
