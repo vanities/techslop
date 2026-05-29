@@ -104,3 +104,7 @@ techslop/
 ├── docker-compose.yml
 └── output/                  # Generated videos (gitignored)
 ```
+
+## License
+
+[GNU General Public License v3.0](LICENSE)
