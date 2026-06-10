@@ -13,7 +13,7 @@ class OpenAITTS(TTSProvider):
         self.config = config
         self.client = AsyncOpenAI(api_key=config.openai_api_key)
 
-    async def synthesize(self, text: str, output_path: Path) -> Path:
+    async def synthesize_chunk(self, text: str, output_path: Path) -> Path:
         response = await self.client.audio.speech.create(
             model=self.MODEL,
             voice=self.VOICE,

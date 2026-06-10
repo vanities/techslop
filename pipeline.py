@@ -26,20 +26,23 @@ from techslop.models import VideoJob
 
 @click.group()
 def cli():
-    """techslop — Automated Tech News YouTube Shorts Pipeline.
+    """techslop — multi-platform AI motion video pipeline.
+
+    Channel selection: set TECHSLOP_ENV=<name> to load .env.<name> instead of .env.
 
     Human-in-the-loop workflow:
 
         \b
         pipeline.py ingest          # 1. Fetch & score stories
         pipeline.py list            # 2. Review stories
-        pipeline.py script <ID>     # 3. Generate script for a story
+        pipeline.py script <ID>     # 3. Generate script
         pipeline.py voice <ID>      # 4. Synthesize voice
-        pipeline.py video <ID>      # 5. Assemble video
-        pipeline.py publish <ID>    # 6. Upload to platforms
+        pipeline.py shots <ID>      # 5. gpt-image-2 grid → split → Kling i2v
+        pipeline.py video <ID>      # 6. Assemble final motion video
+        pipeline.py publish <ID>    # 7. Upload to YT/TikTok/IG/LinkedIn
         \b
-        pipeline.py preview         # Or: auto-pick top story, generate video, open it
-        pipeline.py run             # Or: full auto pipeline with upload
+        pipeline.py preview         # Auto: ingest → … → video, open locally (no upload)
+        pipeline.py run             # Auto: ingest → … → publish to all enabled platforms
     """
     init_db()
     Path(settings.output_dir).mkdir(parents=True, exist_ok=True)
@@ -131,6 +134,69 @@ def show(story_id):
 
 
 @cli.command()
+@click.option("--limit", default=30, help="Max stories to include.")
+@click.option("--source", default=None, help="Filter by source.")
+@click.option("--status", default=None, help="Filter by status.")
+def context(limit, source, status):
+    """Dump ALL ingested stories and context for collaborative script crafting.
+
+    Gathers everything from all sources into one big context dump so you can
+    pick the best stuff and craft a script in Claude Code.
+    """
+    stories = get_all_stories()
+    if not stories:
+        click.echo("No stories found. Run 'ingest' first.")
+        return
+
+    if source:
+        stories = [s for s in stories if s.source == source]
+    if status:
+        stories = [s for s in stories if s.status == status]
+
+    stories = stories[:limit]
+
+    click.echo(f"\n{'='*70}")
+    click.echo(f"ALL STORIES CONTEXT ({len(stories)} stories)")
+    click.echo(f"{'='*70}")
+
+    for i, story in enumerate(stories, 1):
+        click.echo(f"\n{'─'*70}")
+        click.echo(f"[{i}] {story.title}")
+        click.echo(f"    Source: {story.source}  |  Score: {story.score:.2f}  |  ID: {story.id[:12]}")
+        click.echo(f"    URL: {story.url}")
+
+        comments = story.raw_data.get("comments", [])
+        if comments:
+            click.echo(f"    Comments ({len(comments)}):")
+            for c in comments[:5]:
+                if isinstance(c, dict):
+                    text = c.get("text", "")[:200]
+                    author = c.get("author", "anon")
+                    click.echo(f"      [{author}]: {text}")
+                else:
+                    click.echo(f"      {str(c)[:200]}")
+
+        if story.raw_data.get("tweet_text"):
+            click.echo(f"    Tweet: {story.raw_data['tweet_text'][:300]}")
+
+        if story.raw_data.get("summary"):
+            click.echo(f"    Summary: {story.raw_data['summary'][:300]}")
+
+    click.echo(f"\n{'='*70}")
+    click.echo(f"Pick stories to combine into a script. Save to output/<id>/script.json")
+    click.echo(f"Format:")
+    click.echo("""{
+  "story_id": "<id>",
+  "hook": "Attention-grabbing opener (3 seconds)",
+  "body": [
+    {"text": "Narration", "screen_text": "ON-SCREEN TEXT", "duration_hint": 7.0}
+  ],
+  "cta": "Call to action",
+  "full_text": "All narration concatenated for TTS"
+}""")
+
+
+@cli.command()
 @click.argument("story_id")
 @click.option("--interactive", "-i", is_flag=True, help="Dump raw context only — skip AI generation, craft the script yourself.")
 def script(story_id, interactive):
@@ -212,7 +278,70 @@ def voice(story_id):
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Video assembly
+# Step 5: Shots (gpt-image-2 grid → split → Kling motion clips)
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.argument("story_id")
+def shots(story_id):
+    """Generate motion clips for a scripted story.
+
+    Calls gpt-image-2 once to produce a character-consistent grid, splits the
+    grid into per-section keyframes, then animates each via Kling 2.1 Pro i2v.
+    """
+    from techslop.image_gen.grid import generate_grid, grid_shape
+    from techslop.image_gen.split import split_grid
+    from techslop.motion.kling import animate_shots
+
+    story = _find_story(story_id)
+    if not story:
+        return
+
+    story_dir = _story_dir(story.id)
+    script_path = story_dir / "script.json"
+    if not script_path.exists():
+        click.echo(f"No script found. Run 'script {story_id}' first.")
+        return
+
+    script_obj = _load_script_json(script_path, story.id)
+    shots_dir = story_dir / "shots"
+    shots_dir.mkdir(parents=True, exist_ok=True)
+
+    click.echo(f"Generating grid via gpt-image-2 ({len(script_obj.body)} panels)...")
+    grid_path = generate_grid(
+        script=script_obj,
+        output_path=shots_dir / "grid.png",
+        character_brief=settings.character_brief,
+        size=settings.image_size,
+    )
+    click.echo(f"  Grid: {grid_path}")
+
+    rows, cols = grid_shape(len(script_obj.body))
+    click.echo(f"Splitting into {rows}x{cols} keyframes...")
+    keyframes = split_grid(grid_path, rows=rows, cols=cols, output_dir=shots_dir)
+
+    # Use screen_text (or first words of text) as a short motion prompt per shot.
+    motion_prompts = [
+        (s.screen_text or s.text[:60]) + ", subtle cinematic camera motion"
+        for s in script_obj.body[: len(keyframes)]
+    ]
+
+    click.echo(f"Animating {len(keyframes)} shots via Kling i2v (parallel)...")
+    clip_paths = asyncio.run(
+        animate_shots(
+            image_paths=keyframes,
+            motion_prompts=motion_prompts,
+            output_dir=shots_dir,
+            duration=settings.motion_duration,
+        )
+    )
+    click.echo(f"  Clips: {len(clip_paths)} written to {shots_dir}")
+    click.echo(f"\nNext: pipeline.py video {story.id[:12]}")
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Video assembly
 # ---------------------------------------------------------------------------
 
 
@@ -220,8 +349,12 @@ def voice(story_id):
 @click.argument("story_id")
 @click.option("--open", "open_video", is_flag=True, default=True, help="Open video after assembly.")
 def video(story_id, open_video):
-    """Assemble video for a story that has voice synthesized."""
-    from techslop.video.assembler import assemble_video, get_audio_duration
+    """Assemble the final video. Uses motion clips if present, else falls back to a static background."""
+    from techslop.video.assembler import (
+        assemble_video_motion,
+        assemble_video_static,
+        get_audio_duration,
+    )
     from techslop.video.assets import generate_background
     from techslop.video.captions import generate_captions
 
@@ -241,21 +374,33 @@ def video(story_id, open_video):
     captions_path = story_dir / "captions.ass"
     generate_captions(timestamps_path, captions_path)
 
-    click.echo("Generating background...")
-    bg_path = story_dir / "background.png"
-    generate_background(bg_path)
-
-    click.echo("Assembling video...")
     video_path = story_dir / "output.mp4"
-    duration = get_audio_duration(audio_path)
-    assemble_video(
-        audio_path=audio_path,
-        captions_path=captions_path,
-        background_path=bg_path,
-        output_path=video_path,
-        title=story.title,
-        duration=duration,
-    )
+    shots_dir = story_dir / "shots"
+    motion_clips = sorted(shots_dir.glob("clip_*.mp4")) if shots_dir.exists() else []
+
+    if motion_clips:
+        click.echo(f"Assembling motion video from {len(motion_clips)} clips...")
+        assemble_video_motion(
+            clip_paths=motion_clips,
+            audio_path=audio_path,
+            captions_path=captions_path,
+            output_path=video_path,
+            title=story.title,
+        )
+    else:
+        click.echo("No motion clips found — falling back to static background.")
+        bg_path = story_dir / "background.png"
+        generate_background(bg_path)
+        duration = get_audio_duration(audio_path)
+        assemble_video_static(
+            audio_path=audio_path,
+            captions_path=captions_path,
+            background_path=bg_path,
+            output_path=video_path,
+            title=story.title,
+            duration=duration,
+        )
+
     update_story_status(story.id, "rendered")
     click.echo(f"Video: {video_path}")
 
@@ -272,11 +417,12 @@ def video(story_id, open_video):
 
 @cli.command()
 @click.argument("story_id")
-@click.option("--youtube", is_flag=True, default=True, help="Upload to YouTube.")
-@click.option("--tiktok", is_flag=True, default=False, help="Upload to TikTok.")
-@click.option("--instagram", is_flag=True, default=False, help="Upload to Instagram.")
-@click.option("--linkedin", is_flag=True, default=False, help="Upload to LinkedIn.")
-def publish(story_id, youtube, tiktok, instagram, linkedin):
+@click.option("--all", "all_platforms", is_flag=True, default=False, help="Upload to every platform with creds in env.")
+@click.option("--youtube/--no-youtube", default=True, help="Upload to YouTube.")
+@click.option("--tiktok/--no-tiktok", default=False, help="Upload to TikTok.")
+@click.option("--instagram/--no-instagram", default=False, help="Upload to Instagram.")
+@click.option("--linkedin/--no-linkedin", default=False, help="Upload to LinkedIn.")
+def publish(story_id, all_platforms, youtube, tiktok, instagram, linkedin):
     """Upload a rendered video to platforms."""
     story = _find_story(story_id)
     if not story:
@@ -297,6 +443,12 @@ def publish(story_id, youtube, tiktok, instagram, linkedin):
 
     title = f"{story.title[:90]} #Shorts"
 
+    if all_platforms:
+        youtube = bool(settings.youtube_refresh_token)
+        tiktok = bool(settings.tiktok_refresh_token)
+        instagram = bool(settings.instagram_access_token)
+        linkedin = bool(settings.linkedin_access_token)
+
     if youtube:
         click.echo("Uploading to YouTube...")
         from techslop.publish.youtube import upload_to_youtube
@@ -307,25 +459,28 @@ def publish(story_id, youtube, tiktok, instagram, linkedin):
             description=description,
             tags=["tech", "news", "shorts", story.source],
         )
-        click.echo(f"YouTube: https://youtube.com/shorts/{yt_id}")
+        click.echo(f"  YouTube: https://youtube.com/shorts/{yt_id}")
 
     if tiktok:
         click.echo("Uploading to TikTok...")
         from techslop.publish.tiktok import upload_to_tiktok
 
-        upload_to_tiktok(video_path, title)
+        publish_id = upload_to_tiktok(video_path, title)
+        click.echo(f"  TikTok publish_id: {publish_id} (check mobile drafts inbox)")
 
     if instagram:
         click.echo("Uploading to Instagram...")
         from techslop.publish.instagram import upload_to_instagram
 
-        upload_to_instagram(video_path, title)
+        media_id = upload_to_instagram(video_path, title)
+        click.echo(f"  Instagram media_id: {media_id}")
 
     if linkedin:
         click.echo("Uploading to LinkedIn...")
         from techslop.publish.linkedin import upload_to_linkedin
 
-        upload_to_linkedin(video_path, title, description)
+        post_id = upload_to_linkedin(video_path, title, description)
+        click.echo(f"  LinkedIn post: {post_id}")
 
     update_story_status(story.id, "published")
     click.echo("Done!")
@@ -470,13 +625,22 @@ def _open_file(path: Path):
 
 
 def _run_pipeline(count: int = 1, upload: bool = False):
+    from techslop.image_gen.grid import generate_grid, grid_shape
+    from techslop.image_gen.split import split_grid
     from techslop.ingest.sources import ingest_all
+    from techslop.motion.kling import animate_shots
     from techslop.scriptgen.generator import generate_script
-    from techslop.video.assembler import assemble_video, get_audio_duration
+    from techslop.video.assembler import (
+        assemble_video_motion,
+        assemble_video_static,
+        get_audio_duration,
+    )
     from techslop.video.assets import generate_background
     from techslop.video.captions import generate_captions
     from techslop.voice.base import TTSProvider
     from techslop.voice.timestamps import extract_timestamps
+
+    motion_enabled = bool(settings.fal_key)
 
     click.echo("Ingesting stories...")
     stories = asyncio.run(ingest_all())
@@ -517,42 +681,101 @@ def _run_pipeline(count: int = 1, upload: bool = False):
         captions_path = story_dir / "captions.ass"
         generate_captions(timestamps_path, captions_path)
 
-        click.echo("  Generating background...")
-        bg_path = story_dir / "background.png"
-        generate_background(bg_path)
+        motion_clips: list[Path] = []
+        if motion_enabled:
+            click.echo("  Generating gpt-image-2 grid...")
+            shots_dir = story_dir / "shots"
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            grid_path = generate_grid(
+                script=script_obj,
+                output_path=shots_dir / "grid.png",
+                character_brief=settings.character_brief,
+                size=settings.image_size,
+            )
+            rows, cols = grid_shape(len(script_obj.body))
+            keyframes = split_grid(grid_path, rows=rows, cols=cols, output_dir=shots_dir)
+
+            click.echo(f"  Animating {len(keyframes)} shots via Kling i2v...")
+            motion_prompts = [
+                (s.screen_text or s.text[:60]) + ", subtle cinematic camera motion"
+                for s in script_obj.body[: len(keyframes)]
+            ]
+            motion_clips = asyncio.run(
+                animate_shots(
+                    image_paths=keyframes,
+                    motion_prompts=motion_prompts,
+                    output_dir=shots_dir,
+                    duration=settings.motion_duration,
+                )
+            )
 
         click.echo("  Assembling video...")
         video_path = story_dir / "output.mp4"
-        duration = get_audio_duration(audio_path)
-        assemble_video(
-            audio_path=audio_path,
-            captions_path=captions_path,
-            background_path=bg_path,
-            output_path=video_path,
-            title=story.title,
-            duration=duration,
-        )
+        if motion_clips:
+            assemble_video_motion(
+                clip_paths=motion_clips,
+                audio_path=audio_path,
+                captions_path=captions_path,
+                output_path=video_path,
+                title=story.title,
+            )
+        else:
+            bg_path = story_dir / "background.png"
+            generate_background(bg_path)
+            duration = get_audio_duration(audio_path)
+            assemble_video_static(
+                audio_path=audio_path,
+                captions_path=captions_path,
+                background_path=bg_path,
+                output_path=video_path,
+                title=story.title,
+                duration=duration,
+            )
         update_video_job(job_id, video_path=video_path, status="rendered")
         update_story_status(story.id, "rendered")
         click.echo(f"  Video: {video_path}")
 
         if upload:
-            click.echo("  Uploading to YouTube...")
-            from techslop.publish.youtube import upload_to_youtube
-
             description = f"{script_obj.hook}\n\nSource: {story.url}\n\n#tech #news #shorts"
-            yt_id = upload_to_youtube(
-                video_path=video_path,
-                title=f"{story.title[:90]} #Shorts",
-                description=description,
-                tags=["tech", "news", "shorts", story.source],
-            )
+            title = f"{story.title[:90]} #Shorts"
+            tags = ["tech", "news", "shorts", story.source]
+
+            yt_id = None
+            if settings.youtube_refresh_token:
+                click.echo("  Uploading to YouTube...")
+                from techslop.publish.youtube import upload_to_youtube
+
+                yt_id = upload_to_youtube(
+                    video_path=video_path, title=title, description=description, tags=tags,
+                )
+                click.echo(f"    YouTube: https://youtube.com/shorts/{yt_id}")
+
+            if settings.tiktok_refresh_token:
+                click.echo("  Uploading to TikTok...")
+                from techslop.publish.tiktok import upload_to_tiktok
+
+                pid = upload_to_tiktok(video_path, title)
+                click.echo(f"    TikTok publish_id: {pid}")
+
+            if settings.instagram_access_token:
+                click.echo("  Uploading to Instagram...")
+                from techslop.publish.instagram import upload_to_instagram
+
+                mid = upload_to_instagram(video_path, title)
+                click.echo(f"    Instagram media_id: {mid}")
+
+            if settings.linkedin_access_token:
+                click.echo("  Uploading to LinkedIn...")
+                from techslop.publish.linkedin import upload_to_linkedin
+
+                pid = upload_to_linkedin(video_path, title, description)
+                click.echo(f"    LinkedIn post: {pid}")
+
             update_video_job(
                 job_id, youtube_id=yt_id, status="published",
                 published_at=datetime.now(timezone.utc),
             )
             update_story_status(story.id, "published")
-            click.echo(f"  Published: https://youtube.com/shorts/{yt_id}")
         else:
             click.echo(f"  Preview: {video_path}")
             _open_file(video_path)

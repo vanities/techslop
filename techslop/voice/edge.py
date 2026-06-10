@@ -11,7 +11,7 @@ class EdgeTTS(TTSProvider):
     def __init__(self, config):
         self.config = config
 
-    async def synthesize(self, text: str, output_path: Path) -> Path:
+    async def synthesize_chunk(self, text: str, output_path: Path) -> Path:
         communicate = edge_tts.Communicate(text, self.VOICE)
         await communicate.save(str(output_path))
         return output_path

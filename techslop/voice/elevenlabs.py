@@ -7,5 +7,5 @@ class ElevenLabsTTS(TTSProvider):
     def __init__(self, config):
         self.config = config
 
-    async def synthesize(self, text: str, output_path: Path) -> Path:
+    async def synthesize_chunk(self, text: str, output_path: Path) -> Path:
         raise NotImplementedError("ElevenLabs TTS not yet implemented")
